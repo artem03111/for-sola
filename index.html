@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Traffic Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+  :root{
+    --navy:#101b34;
+    --navy-2:#16264a;
+    --paper:#f5f6f8;
+    --card:#ffffff;
+    --ink:#101b34;
+    --muted:#6b7488;
+    --line:#e6e8ee;
+    --green:#1a9c6b;
+    --green-bg:#e7f7f0;
+    --red:#d1483f;
+    --red-bg:#fbeae8;
+    --amber:#c17f16;
+    --amber-bg:#faf1e0;
+    --accent:#3d5afe;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:"Inter","Segoe UI",system-ui,-apple-system,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .topbar{
+    background:var(--navy); color:#fff;
+    padding:18px 28px; display:flex; align-items:center; justify-content:space-between;
+    position:sticky; top:0; z-index:10;
+  }
+  .topbar h1{font-size:16px; font-weight:600; letter-spacing:.02em; margin:0;}
+  .topbar .sub{font-size:12px; color:#9aa5c4; margin-top:2px;}
+  .status{font-size:12px; color:#9aa5c4; display:flex; align-items:center; gap:8px;}
+  .dot{width:7px; height:7px; border-radius:50%; background:var(--green); display:inline-block;}
+
+  .controls{
+    display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+    padding:16px 28px; background:var(--card); border-bottom:1px solid var(--line);
+  }
+  .controls input[type=date], .controls select{
+    border:1px solid var(--line); border-radius:8px; padding:8px 10px;
+    font-size:13px; color:var(--ink); background:#fff; font-family:inherit;
+  }
+  .controls label{font-size:12px; color:var(--muted); margin-right:4px;}
+  .btn{
+    border:none; border-radius:8px; padding:9px 16px; font-size:13px; font-weight:600;
+    cursor:pointer; background:var(--navy); color:#fff;
+  }
+  .btn.ghost{background:#fff; color:var(--navy); border:1px solid var(--line);}
+  .tabs{display:flex; gap:6px; margin-left:auto;}
+  .tab{
+    padding:8px 14px; border-radius:20px; font-size:12px; font-weight:600;
+    border:1px solid var(--line); background:#fff; color:var(--muted); cursor:pointer;
+  }
+  .tab.active{background:var(--navy); color:#fff; border-color:var(--navy);}
+
+  .wrap{padding:24px 28px 60px; max-width:1400px; margin:0 auto;}
+
+  .kpis{display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:14px; margin-bottom:20px;}
+  .kpi{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px;}
+  .kpi .label{font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:8px;}
+  .kpi .value{font-size:24px; font-weight:700; font-variant-numeric:tabular-nums;}
+  .kpi .value.green{color:var(--green);}
+  .kpi .value.red{color:var(--red);}
+
+  .grid{display:grid; grid-template-columns:1.1fr .9fr; gap:18px; margin-bottom:20px;}
+  @media (max-width:900px){.grid{grid-template-columns:1fr;}}
+
+  .card{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px;}
+  .card h2{font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:0 0 16px;}
+  .chart-box{height:260px; position:relative;}
+
+  table{width:100%; border-collapse:collapse; font-size:13px;}
+  th{
+    text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.04em;
+    color:var(--muted); font-weight:600; padding:8px 10px; border-bottom:1px solid var(--line);
+  }
+  td{padding:10px; border-bottom:1px solid var(--line); font-variant-numeric:tabular-nums;}
+  tr:last-child td{border-bottom:none;}
+  .brand-name{font-weight:600;}
+  .badge{
+    display:inline-block; padding:2px 9px; border-radius:20px; font-size:11px; font-weight:700;
+  }
+  .badge.ok{background:var(--green-bg); color:var(--green);}
+  .badge.warn{background:var(--amber-bg); color:var(--amber);}
+  .conv-bar-bg{background:#eef0f4; border-radius:6px; height:6px; width:70px; overflow:hidden; display:inline-block; vertical-align:middle; margin-right:8px;}
+  .conv-bar{height:100%; background:var(--green); border-radius:6px;}
+
+  .empty, .error{padding:60px 20px; text-align:center; color:var(--muted); font-size:14px;}
+  .error{color:var(--red);}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div>
+    <h1>TRAFFIC DASHBOARD</h1>
+    <div class="sub">Аналитика по брендам и методам оплаты</div>
+  </div>
+  <div class="status"><span class="dot" id="statusDot"></span><span id="statusText">загрузка…</span></div>
+</div>
+
+<div class="controls">
+  <label>С</label>
+  <input type="date" id="dateFrom">
+  <label>По</label>
+  <input type="date" id="dateTo">
+  <button class="btn ghost" id="quick7">7 дней</button>
+  <button class="btn ghost" id="quick30">30 дней</button>
+  <button class="btn" id="applyBtn">Применить</button>
+  <button class="btn ghost" id="refreshBtn">Обновить данные</button>
+  <div class="tabs">
+    <div class="tab active" data-op="deposit">Depositы</div>
+    <div class="tab" data-op="payout">Payoutы</div>
+  </div>
+</div>
+
+<div class="wrap" id="wrap">
+  <div class="empty">Загрузка данных…</div>
+</div>
+
+<script>
+const API = ""; // тот же хост
+let currentOp = "deposit";
+
+const dateFrom = document.getElementById("dateFrom");
+const dateTo = document.getElementById("dateTo");
+
+function fmtDate(d){ return d.toISOString().slice(0,10); }
+(function initDates(){
+  const to = new Date();
+  const from = new Date(); from.setDate(from.getDate()-6);
+  dateFrom.value = fmtDate(from);
+  dateTo.value = fmtDate(to);
+})();
+
+document.getElementById("quick7").onclick = () => {
+  const to = new Date(); const from = new Date(); from.setDate(from.getDate()-6);
+  dateFrom.value = fmtDate(from); dateTo.value = fmtDate(to); load();
+};
+document.getElementById("quick30").onclick = () => {
+  const to = new Date(); const from = new Date(); from.setDate(from.getDate()-29);
+  dateFrom.value = fmtDate(from); dateTo.value = fmtDate(to); load();
+};
+document.getElementById("applyBtn").onclick = load;
+document.getElementById("refreshBtn").onclick = async () => {
+  document.getElementById("statusText").textContent = "обновляю…";
+  await fetch(API + "/api/refresh");
+  load();
+};
+
+document.querySelectorAll(".tab").forEach(t => {
+  t.onclick = () => {
+    document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+    t.classList.add("active");
+    currentOp = t.dataset.op;
+    load();
+  };
+});
+
+let channelChart, brandChart;
+
+async function load(){
+  const wrap = document.getElementById("wrap");
+  const params = new URLSearchParams({
+    date_from: dateFrom.value, date_to: dateTo.value, op_type: currentOp
+  });
+  try{
+    const res = await fetch(API + "/api/dashboard?" + params.toString());
+    const data = await res.json();
+
+    const dot = document.getElementById("statusDot");
+    const txt = document.getElementById("statusText");
+    if(data.error){
+      dot.style.background = "var(--red)";
+      txt.textContent = "ошибка источника данных";
+      wrap.innerHTML = `<div class="error">${data.error}</div>`;
+      return;
+    }
+    dot.style.background = "var(--green)";
+    txt.textContent = data.updated_at ? ("данные обновлены: " + new Date(data.updated_at).toLocaleString("ru-RU")) : "нет данных";
+
+    render(data);
+  }catch(e){
+    document.getElementById("statusText").textContent = "нет связи с сервером";
+    wrap.innerHTML = `<div class="error">Не удалось загрузить данные: ${e}</div>`;
+  }
+}
+
+function convBadge(conv){
+  const cls = conv >= 50 ? "ok" : "warn";
+  return `<span class="badge ${cls}">${conv.toFixed(2)}%</span>`;
+}
+
+function render(data){
+  const wrap = document.getElementById("wrap");
+  const o = data.overall || {total:0,success:0,decline:0,processing:0,amount_success:0,conversion:0};
+
+  wrap.innerHTML = `
+    <div class="kpis">
+      <div class="kpi"><div class="label">Всего транзакций</div><div class="value">${o.total}</div></div>
+      <div class="kpi"><div class="label">Успешных</div><div class="value green">${o.success}</div></div>
+      <div class="kpi"><div class="label">Отклонено</div><div class="value red">${o.decline}</div></div>
+      <div class="kpi"><div class="label">Сумма успешных</div><div class="value">${o.amount_success.toLocaleString("ru-RU",{minimumFractionDigits:2})}</div></div>
+      <div class="kpi"><div class="label">Конверсия</div><div class="value ${o.conversion>=50?'green':'red'}">${o.conversion.toFixed(2)}%</div></div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>По брендам</h2>
+        <table id="brandTable">
+          <thead><tr><th>Бренд</th><th>Всего</th><th>Success</th><th>Decline</th><th>Сумма</th><th>Конверсия</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h2>По методу оплаты</h2>
+        <div class="chart-box"><canvas id="channelCanvas"></canvas></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Топ брендов по объёму (успешные транзакции)</h2>
+      <div class="chart-box"><canvas id="brandCanvas"></canvas></div>
+    </div>
+  `;
+
+  const tbody = wrap.querySelector("#brandTable tbody");
+  (data.by_brand || []).forEach(b => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="brand-name">${b.brand}</td>
+      <td>${b.total}</td>
+      <td>${b.success}</td>
+      <td>${b.decline}</td>
+      <td>${b.amount_success.toLocaleString("ru-RU",{minimumFractionDigits:2})}</td>
+      <td><span class="conv-bar-bg"><span class="conv-bar" style="width:${Math.min(b.conversion,100)}%"></span></span>${convBadge(b.conversion)}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+  if(!(data.by_brand || []).length){
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">Нет данных за период</td></tr>`;
+  }
+
+  // channel pie
+  const chCtx = document.getElementById("channelCanvas");
+  const chLabels = Object.keys(data.by_channel || {});
+  const chValues = chLabels.map(k => data.by_channel[k].total);
+  if(channelChart) channelChart.destroy();
+  channelChart = new Chart(chCtx, {
+    type: "doughnut",
+    data: {
+      labels: chLabels,
+      datasets: [{ data: chValues, backgroundColor: ["#3d5afe","#1a9c6b","#c17f16","#9aa5c4"], borderWidth: 0 }]
+    },
+    options: { plugins:{ legend:{ position:"bottom", labels:{ boxWidth:10, font:{size:11} } } }, cutout:"62%" }
+  });
+
+  // brand bar
+  const brCtx = document.getElementById("brandCanvas");
+  const top = (data.by_brand || []).slice(0, 10);
+  if(brandChart) brandChart.destroy();
+  brandChart = new Chart(brCtx, {
+    type: "bar",
+    data: {
+      labels: top.map(b => b.brand),
+      datasets: [{ label:"Сумма успешных", data: top.map(b => b.amount_success), backgroundColor:"#101b34", borderRadius:4 }]
+    },
+    options: {
+      plugins:{legend:{display:false}},
+      scales:{ y:{ beginAtZero:true, grid:{color:"#eef0f4"} }, x:{ grid:{display:false} } }
+    }
+  });
+}
+
+load();
+</script>
+</body>
+</html>
