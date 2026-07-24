@@ -324,4 +324,4 @@ def serve_app():
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
-    return HTMLResponse(content="<h1>index.html not found</h1>", status_code=404)м
+    return HTMLResponse(content="<h1>index.html not found</h1>", status_code=404)
