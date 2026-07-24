@@ -80,15 +80,37 @@ def to_float(x):
         return 0.0
 
 
+HEADER_HINTS = ["merchant", "amount", "status", "currency", "operation", "email", "payment"]
+
+
+def _find_header_row(lines):
+    for i, line in enumerate(lines[:10]):
+        low = line.lower()
+        if sum(1 for h in HEADER_HINTS if h in low) >= 2:
+            return i
+    return 0
+
+
 def fetch_sheet_df() -> pd.DataFrame:
     if not CSV_URL:
         raise RuntimeError("CSV_URL не задан (переменная окружения)")
     resp = requests.get(CSV_URL, timeout=30)
     resp.raise_for_status()
     text = resp.content.decode("utf-8", errors="replace")
-    df = pd.read_csv(StringIO(text), dtype=str, keep_default_na=False)
+    lines = text.splitlines()
+
+    header_idx = _find_header_row(lines)
+    trimmed = "\n".join(lines[header_idx:])
+
+    def _parse(sep):
+        return pd.read_csv(
+            StringIO(trimmed), sep=sep, dtype=str, keep_default_na=False,
+            engine="python", on_bad_lines="skip",
+        )
+
+    df = _parse(",")
     if df.shape[1] <= 1:
-        df = pd.read_csv(StringIO(text), sep=";", dtype=str, keep_default_na=False)
+        df = _parse(";")
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
