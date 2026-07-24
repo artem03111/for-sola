@@ -220,6 +220,29 @@ def force_refresh():
         return {"ok": True, "updated_at": _cache["updated_at"], "rows": len(_cache["df"])}
 
 
+@app.get("/api/debug")
+def debug():
+    with _lock:
+        df = _cache["df"].copy()
+        error = _cache["error"]
+
+    if df.empty:
+        return {"error": error or "Нет данных", "columns": []}
+
+    def top_values(col, n=15):
+        return df[col].value_counts(dropna=False).head(n).to_dict()
+
+    return {
+        "rows": len(df),
+        "date_min": str(df["date"].min()),
+        "date_max": str(df["date"].max()),
+        "op_type_values": {str(k): v for k, v in top_values("op_type").items()},
+        "status_values": {str(k): v for k, v in top_values("status").items()},
+        "channel_values": {str(k): v for k, v in top_values("channel").items()},
+        "merchant_sample": df["merchant_display"].dropna().unique()[:15].tolist(),
+    }
+
+
 @app.get("/api/dashboard")
 def dashboard(
     date_from: str = Query(None, description="YYYY-MM-DD"),
