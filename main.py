@@ -105,7 +105,7 @@ def fetch_sheet_df() -> pd.DataFrame:
     def _parse(sep):
         return pd.read_csv(
             StringIO(trimmed), sep=sep, dtype=str, keep_default_na=False,
-            engine="python", on_bad_lines="skip",
+            on_bad_lines="skip",
         )
 
     df = _parse(",")
@@ -324,4 +324,4 @@ def serve_app():
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
-    return HTMLResponse(content="<h1>index.html not found</h1>", status_code=404)
+    return HTMLResponse(content="<h1>index.html not found</h1>", status_code=404)м
