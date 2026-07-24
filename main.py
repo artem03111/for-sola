@@ -1,16 +1,15 @@
 """
-Traffic Dashboard — FastAPI backend
+Traffic Dashboard — FastAPI backend (без pandas, лёгкий по памяти)
 Источник данных: опубликованная Google Таблица (CSV export link)
 """
 
+import csv
 import os
-import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 
-import pandas as pd
 import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,11 +19,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 # CONFIG
 # =============================================================================
 
-# Ссылка вида:
-# https://docs.google.com/spreadsheets/d/e/2PACX-xxxx/pub?gid=0&single=true&output=csv
 CSV_URL = os.getenv("CSV_URL", "")
-
-REFRESH_SECONDS = int(os.getenv("REFRESH_SECONDS", "60"))  # как часто фоново обновлять кэш
+REFRESH_SECONDS = int(os.getenv("REFRESH_SECONDS", "60"))
 
 EXCLUDED_MERCHANTS = {
     "sognolab", "cratecracker", "fiftytemps", "asquad",
@@ -34,6 +30,8 @@ CARD_PAY_TYPES = {"visa", "mastercard", "maestro"}
 OB_PAY_TYPES   = {"open-banking", "banks/germany"}
 SHOW_STATUSES  = {"success", "decline", "processing"}
 APPLE_PAY_METHOD_CODE = "69"
+
+HEADER_HINTS = ["merchant", "amount", "status", "currency", "operation", "email", "payment"]
 
 # =============================================================================
 # APP
@@ -48,42 +46,54 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =============================================================================
-# CACHE (фоновое обновление, чтобы дашборд открывался мгновенно)
-# =============================================================================
-
-_cache = {"df": pd.DataFrame(), "updated_at": None, "error": None}
+_cache = {"rows": [], "updated_at": None, "error": None}
 _lock = threading.Lock()
 
-
-def norm_key(value):
-    return re.sub(r"\s+", " ", (value or "").strip().lower())
-
+# =============================================================================
+# HELPERS
+# =============================================================================
 
 def strip_apostrophe(value):
-    s = str(value or "").strip()
+    s = (value or "").strip()
     return s[1:].lstrip() if s.startswith("'") else s
 
 
-def find_col(df, keywords):
-    for c in df.columns:
-        if any(k in c.lower() for k in keywords):
-            return c
-    return None
-
-
 def to_float(x):
-    s = str(x or "").strip().replace(" ", "").replace(",", ".")
+    s = (x or "").strip().replace(" ", "").replace(",", ".")
     try:
         return float(s)
     except Exception:
         return 0.0
 
 
-HEADER_HINTS = ["merchant", "amount", "status", "currency", "operation", "email", "payment"]
+def parse_date(x):
+    s = (x or "").strip()
+    if not s:
+        return None
+    s = s.replace("Z", "+00:00")
+    for fmt in (None, "%Y-%m-%d %H:%M:%S", "%d.%m.%Y %H:%M:%S", "%d.%m.%Y"):
+        try:
+            if fmt is None:
+                dt = datetime.fromisoformat(s)
+            else:
+                dt = datetime.strptime(s, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            continue
+    return None
 
 
-def _find_header_row(lines):
+def find_col(fieldnames, keywords):
+    for c in fieldnames:
+        low = c.lower()
+        if any(k in low for k in keywords):
+            return c
+    return None
+
+
+def find_header_row(lines):
     for i, line in enumerate(lines[:10]):
         low = line.lower()
         if sum(1 for h in HEADER_HINTS if h in low) >= 2:
@@ -91,87 +101,86 @@ def _find_header_row(lines):
     return 0
 
 
-def fetch_sheet_df() -> pd.DataFrame:
+def fetch_csv_text() -> str:
     if not CSV_URL:
         raise RuntimeError("CSV_URL не задан (переменная окружения)")
     resp = requests.get(CSV_URL, timeout=30)
     resp.raise_for_status()
-    text = resp.content.decode("utf-8", errors="replace")
-    lines = text.splitlines()
+    return resp.content.decode("utf-8", errors="replace")
 
-    header_idx = _find_header_row(lines)
+
+def parse_rows(text: str):
+    lines = text.splitlines()
+    header_idx = find_header_row(lines)
     trimmed = "\n".join(lines[header_idx:])
 
-    def _parse(sep):
-        return pd.read_csv(
-            StringIO(trimmed), sep=sep, dtype=str, keep_default_na=False,
-            on_bad_lines="skip",
-        )
+    def _read(delim):
+        reader = csv.DictReader(StringIO(trimmed), delimiter=delim)
+        return reader.fieldnames, list(reader)
 
-    df = _parse(",")
-    if df.shape[1] <= 1:
-        df = _parse(";")
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
+    fieldnames, raw_rows = _read(",")
+    if not fieldnames or len(fieldnames) <= 1:
+        fieldnames, raw_rows = _read(";")
+    if not fieldnames:
+        return []
 
+    merchant_col = find_col(fieldnames, ["merchant"])
+    status_col   = find_col(fieldnames, ["operation_status", "status"])
+    optype_col   = find_col(fieldnames, ["operation_type", "type"])
+    amount_col   = find_col(fieldnames, ["amount"])
+    currency_col = find_col(fieldnames, ["currency"])
+    paytype_col  = find_col(fieldnames, ["payment_type_id", "payment_method_type", "payment type"])
+    method_col   = find_col(fieldnames, ["payment method", "payment_method"])
+    date_col     = find_col(fieldnames, ["created_at", "operation_created_at", "created"])
 
-def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
-    merchant_col = find_col(df, ["merchant_name", "merchant name", "merchant"])
-    status_col   = find_col(df, ["operation_status", "status"])
-    optype_col   = find_col(df, ["operation_type", "type"])
-    amount_col   = find_col(df, ["amount"])
-    currency_col = find_col(df, ["currency"])
-    paytype_col  = find_col(df, ["payment_type_id", "payment_method_type", "payment type"])
-    method_col   = find_col(df, ["payment method", "payment_method"])
-    date_col     = find_col(df, ["created_at", "operation_created_at", "created"])
+    out = []
+    for r in raw_rows:
+        if r is None:
+            continue
+        merchant_raw = (r.get(merchant_col) or "").strip() if merchant_col else ""
+        merchant_low = merchant_raw.lower()
+        if not merchant_raw or merchant_low in EXCLUDED_MERCHANTS:
+            continue
 
-    work = pd.DataFrame(index=df.index)
-    work["merchant"] = df[merchant_col].astype(str).str.strip().str.lower() if merchant_col else "unknown"
-    work["merchant_display"] = df[merchant_col].astype(str).str.strip() if merchant_col else "Unknown"
-    work["status"] = df[status_col].astype(str).str.strip().str.lower() if status_col else ""
-    work["op_type"] = df[optype_col].astype(str).str.strip().str.lower() if optype_col else ""
-    work["amt"] = df[amount_col].apply(to_float) if amount_col else 0.0
-    work["cur"] = df[currency_col].astype(str).str.strip().str.upper() if currency_col else ""
-    work["pay_type"] = df[paytype_col].astype(str).str.strip().str.lower() if paytype_col else ""
-    work["pay_method"] = df[method_col].astype(str).map(strip_apostrophe).str.strip() if method_col else ""
+        status = (r.get(status_col) or "").strip().lower() if status_col else ""
+        op_type = (r.get(optype_col) or "").strip().lower() if optype_col else ""
+        amt = to_float(r.get(amount_col)) if amount_col else 0.0
+        cur = (r.get(currency_col) or "").strip().upper() if currency_col else ""
+        pay_type = (r.get(paytype_col) or "").strip().lower() if paytype_col else ""
+        pay_method = strip_apostrophe(r.get(method_col)).strip() if method_col else ""
+        date = parse_date(r.get(date_col)) if date_col else None
 
-    if date_col:
-        work["date"] = pd.to_datetime(df[date_col], utc=True, errors="coerce")
-    else:
-        work["date"] = pd.Series(pd.NaT, index=work.index, dtype="datetime64[ns, UTC]")
+        is_apple = pay_method == APPLE_PAY_METHOD_CODE
+        is_card = pay_type in CARD_PAY_TYPES
+        is_ob = pay_type in OB_PAY_TYPES
+        if is_apple:
+            channel = "apple_pay"
+        elif is_card:
+            channel = "card"
+        elif is_ob:
+            channel = "open_banking"
+        else:
+            channel = "other"
 
-    # на всякий случай гарантируем tz-aware dtype (могло съехать при пустой/смешанной колонке)
-    if work["date"].dt.tz is None:
-        work["date"] = work["date"].dt.tz_localize("UTC")
-
-    work = work[~work["merchant"].isin(EXCLUDED_MERCHANTS)]
-
-    is_apple = work["pay_method"] == APPLE_PAY_METHOD_CODE
-    is_card = work["pay_type"].isin(CARD_PAY_TYPES)
-    is_ob = work["pay_type"].isin(OB_PAY_TYPES)
-
-    def channel(row_apple, row_card, row_ob):
-        if row_apple:
-            return "apple_pay"
-        if row_card:
-            return "card"
-        if row_ob:
-            return "open_banking"
-        return "other"
-
-    work["channel"] = [
-        channel(a, c, o) for a, c, o in zip(is_apple, is_card & ~is_apple, is_ob)
-    ]
-
-    return work
+        out.append({
+            "merchant": merchant_low,
+            "merchant_display": merchant_raw,
+            "status": status,
+            "op_type": op_type,
+            "amt": amt,
+            "cur": cur,
+            "channel": channel,
+            "date": date,
+        })
+    return out
 
 
 def refresh_cache():
     try:
-        raw = fetch_sheet_df()
-        prepared = prepare_df(raw)
+        text = fetch_csv_text()
+        rows = parse_rows(text)
         with _lock:
-            _cache["df"] = prepared
+            _cache["rows"] = rows
             _cache["updated_at"] = datetime.utcnow().isoformat() + "Z"
             _cache["error"] = None
     except Exception as e:
@@ -181,15 +190,33 @@ def refresh_cache():
 
 def background_refresh_loop():
     while True:
-        refresh_cache()
         time.sleep(REFRESH_SECONDS)
+        refresh_cache()
 
 
 @app.on_event("startup")
 def on_startup():
-    refresh_cache()  # первая загрузка сразу при старте
-    t = threading.Thread(target=background_refresh_loop, daemon=True)
+    t = threading.Thread(target=refresh_cache, daemon=True)
     t.start()
+    t2 = threading.Thread(target=background_refresh_loop, daemon=True)
+    t2.start()
+
+
+# =============================================================================
+# AGGREGATION
+# =============================================================================
+
+def agg_block(rows):
+    total = len(rows)
+    succ = sum(1 for r in rows if r["status"] == "success")
+    decl = sum(1 for r in rows if r["status"] == "decline")
+    proc = sum(1 for r in rows if r["status"] == "processing")
+    amount_success = sum(r["amt"] for r in rows if r["status"] == "success")
+    conv = round(succ / total * 100, 2) if total else 0.0
+    return {
+        "total": total, "success": succ, "decline": decl, "processing": proc,
+        "amount_success": round(amount_success, 2), "conversion": conv,
+    }
 
 
 # =============================================================================
@@ -207,7 +234,7 @@ def status():
         return {
             "updated_at": _cache["updated_at"],
             "error": _cache["error"],
-            "rows": len(_cache["df"]),
+            "rows": len(_cache["rows"]),
         }
 
 
@@ -217,29 +244,33 @@ def force_refresh():
     with _lock:
         if _cache["error"]:
             raise HTTPException(500, _cache["error"])
-        return {"ok": True, "updated_at": _cache["updated_at"], "rows": len(_cache["df"])}
+        return {"ok": True, "updated_at": _cache["updated_at"], "rows": len(_cache["rows"])}
 
 
 @app.get("/api/debug")
 def debug():
     with _lock:
-        df = _cache["df"].copy()
+        rows = list(_cache["rows"])
         error = _cache["error"]
 
-    if df.empty:
-        return {"error": error or "Нет данных", "columns": []}
+    if not rows:
+        return {"error": error or "Нет данных", "rows": 0}
 
-    def top_values(col, n=15):
-        return df[col].value_counts(dropna=False).head(n).to_dict()
+    def top_values(key, n=15):
+        counts = {}
+        for r in rows:
+            counts[r[key]] = counts.get(r[key], 0) + 1
+        return dict(sorted(counts.items(), key=lambda kv: -kv[1])[:n])
 
+    dates = [r["date"] for r in rows if r["date"]]
     return {
-        "rows": len(df),
-        "date_min": str(df["date"].min()),
-        "date_max": str(df["date"].max()),
-        "op_type_values": {str(k): v for k, v in top_values("op_type").items()},
-        "status_values": {str(k): v for k, v in top_values("status").items()},
-        "channel_values": {str(k): v for k, v in top_values("channel").items()},
-        "merchant_sample": df["merchant_display"].dropna().unique()[:15].tolist(),
+        "rows": len(rows),
+        "date_min": str(min(dates)) if dates else None,
+        "date_max": str(max(dates)) if dates else None,
+        "op_type_values": top_values("op_type"),
+        "status_values": top_values("status"),
+        "channel_values": top_values("channel"),
+        "merchant_sample": list({r["merchant_display"] for r in rows})[:15],
     }
 
 
@@ -250,64 +281,63 @@ def dashboard(
     op_type: str = Query("deposit", description="deposit | payout"),
 ):
     with _lock:
-        df = _cache["df"].copy()
+        rows = list(_cache["rows"])
         error = _cache["error"]
         updated_at = _cache["updated_at"]
 
-    if df.empty:
+    if not rows:
         return JSONResponse({"error": error or "Нет данных", "updated_at": updated_at})
 
+    start = end = None
     if date_from:
-        start = pd.to_datetime(date_from, utc=True)
-        df = df[df["date"] >= start]
+        start = datetime.strptime(date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     if date_to:
-        end = pd.to_datetime(date_to, utc=True) + pd.Timedelta(days=1)
-        df = df[df["date"] < end]
+        end = datetime.strptime(date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
 
     op_map = {"deposit": {"sale", "payment confirmation"}, "payout": {"payout"}}
-    df = df[df["op_type"].isin(op_map.get(op_type, op_map["deposit"]))]
-    df = df[df["status"].isin(SHOW_STATUSES)]
+    allowed_ops = op_map.get(op_type, op_map["deposit"])
 
-    def agg_block(sub: pd.DataFrame):
-        total = len(sub)
-        succ = int((sub["status"] == "success").sum())
-        decl = int((sub["status"] == "decline").sum())
-        proc = int((sub["status"] == "processing").sum())
-        amt_success = float(sub.loc[sub["status"] == "success", "amt"].sum())
-        conv = round(succ / total * 100, 2) if total else 0.0
-        return {
-            "total": total, "success": succ, "decline": decl, "processing": proc,
-            "amount_success": round(amt_success, 2), "conversion": conv,
-        }
+    filtered = []
+    for r in rows:
+        if r["op_type"] not in allowed_ops:
+            continue
+        if r["status"] not in SHOW_STATUSES:
+            continue
+        if start and (r["date"] is None or r["date"] < start):
+            continue
+        if end and (r["date"] is None or r["date"] >= end):
+            continue
+        filtered.append(r)
 
-    # по каналу оплаты
     by_channel = {}
     for ch, label in [("card", "Card"), ("apple_pay", "Apple Pay"), ("open_banking", "Open Banking")]:
-        sub = df[df["channel"] == ch]
-        if len(sub):
+        sub = [r for r in filtered if r["channel"] == ch]
+        if sub:
             by_channel[label] = agg_block(sub)
 
-    # по бренду/мерчанту
+    brand_groups = {}
+    for r in filtered:
+        brand_groups.setdefault(r["merchant_display"], []).append(r)
+
     by_brand = []
-    for merchant, sub in df.groupby("merchant_display"):
-        if not merchant:
-            continue
+    for merchant, sub in brand_groups.items():
         block = agg_block(sub)
         block["brand"] = merchant
         by_brand.append(block)
     by_brand.sort(key=lambda x: x["total"], reverse=True)
 
-    # по бренду x каналу (для детальной разбивки)
+    bc_groups = {}
+    for r in filtered:
+        bc_groups.setdefault((r["merchant_display"], r["channel"]), []).append(r)
+
     by_brand_channel = []
-    for (merchant, ch), sub in df.groupby(["merchant_display", "channel"]):
-        if not merchant:
-            continue
+    for (merchant, ch), sub in bc_groups.items():
         block = agg_block(sub)
         block["brand"] = merchant
         block["channel"] = ch
         by_brand_channel.append(block)
 
-    overall = agg_block(df)
+    overall = agg_block(filtered)
 
     return {
         "updated_at": updated_at,
