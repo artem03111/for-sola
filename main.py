@@ -138,7 +138,11 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     if date_col:
         work["date"] = pd.to_datetime(df[date_col], utc=True, errors="coerce")
     else:
-        work["date"] = pd.NaT
+        work["date"] = pd.Series(pd.NaT, index=work.index, dtype="datetime64[ns, UTC]")
+
+    # на всякий случай гарантируем tz-aware dtype (могло съехать при пустой/смешанной колонке)
+    if work["date"].dt.tz is None:
+        work["date"] = work["date"].dt.tz_localize("UTC")
 
     work = work[~work["merchant"].isin(EXCLUDED_MERCHANTS)]
 
